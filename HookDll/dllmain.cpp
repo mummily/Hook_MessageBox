@@ -1,15 +1,9 @@
 ﻿// dllmain.cpp : 定义 DLL 应用程序的入口点。
 #include "stdafx.h"
-
-#include <Dbghelp.h>
-#pragma comment(lib, "dbghelp.lib") 
+#include <string>
 
 #include <detours.h>
-#include <string>
 #pragma comment(lib,"detours.lib")
-
-HANDLE process;
-static HMODULE s_hDll;
 
 typedef int (WINAPI * PFN_MESSAGEBOXA)(HWND hWnd,
     LPCSTR lpText,
@@ -22,10 +16,10 @@ typedef int (WINAPI * PFN_MESSAGEBOXW)(HWND hWnd,
     UINT uType);
 
 //目标函数指针
-PFN_MESSAGEBOXA g_oldMessageBoxA = NULL;
-PFN_MESSAGEBOXW g_oldMessageBoxW = NULL;
+PFN_MESSAGEBOXA g_pMessageBoxA = MessageBoxA;
+PFN_MESSAGEBOXW g_pMessageBoxW = MessageBoxW;
 
-int WINAPI MyMessageBoxA(HWND hWnd,
+int WINAPI HookMessageBoxA(HWND hWnd,
     LPCSTR lpText,
     LPCSTR lpCaption,
     UINT uType)
@@ -34,71 +28,81 @@ int WINAPI MyMessageBoxA(HWND hWnd,
     sCaption += " Attached by Detour";
     std::string sText = lpText;
     sText += " Modified in MessageBoxA";
-    return g_oldMessageBoxA(hWnd, sText.data(), sCaption.data(), uType);
+    return g_pMessageBoxA(hWnd, sText.data(), sCaption.data(), uType);
 }
 
-int WINAPI MyMessageBoxW(HWND hWnd,
+int WINAPI HookMessageBoxW(HWND hWnd,
     LPCWSTR lpText,
     LPCWSTR lpCaption,
     UINT uType)
 {
-    std::wstring sCaption= lpCaption;
+    std::wstring sCaption = lpCaption;
     sCaption += L" Attached by Detour";
     std::wstring sText = lpText;
     sText += L" Modified in MessageBoxW";
-    return g_oldMessageBoxW(hWnd, sText.data(), sCaption.data(), uType);
+    return g_pMessageBoxW(hWnd, sText.data(), sCaption.data(), uType);
 }
 
-extern "C" _declspec(dllexport) BOOL APIENTRY SetHook()
+extern "C" _declspec(dllexport) BOOL APIENTRY StartHook()
+{
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread()); //只有一个线程，所以用GetCurrentThread  
+
+    //关联目标函数和我们自定义的截获函数
+    if (DetourAttach(&(PVOID&)g_pMessageBoxA, HookMessageBoxA) != NO_ERROR)
+    {
+        OutputDebugStringA("DetourAttach MessageBoxA Fail!\n");
+    }
+
+    if (DetourAttach(&(PVOID&)g_pMessageBoxW, HookMessageBoxW) != NO_ERROR)
+    {
+        OutputDebugStringA("DetourAttach MessageBoxW Fail!\n");
+    }
+
+    //完成事务
+    return DetourTransactionCommit() == NO_ERROR;
+}
+
+extern "C" _declspec(dllexport) BOOL APIENTRY StopHook()
 {
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
-    g_oldMessageBoxA = (PFN_MESSAGEBOXA)DetourFindFunction("user32.dll", "MessageBoxA");
-    g_oldMessageBoxW = (PFN_MESSAGEBOXW)DetourFindFunction("user32.dll", "MessageBoxW");
-    DetourAttach(&(PVOID&)g_oldMessageBoxA, MyMessageBoxA);
-    DetourAttach(&(PVOID&)g_oldMessageBoxW, MyMessageBoxW);
+    //解除截获关系
+    if (DetourDetach(&(PVOID&)g_pMessageBoxA, HookMessageBoxA) != NO_ERROR)
+    {
+        OutputDebugStringA("DetourDetach MessageBoxA Fail!\n");
+    }
 
-    LONG ret = DetourTransactionCommit();
-    return ret == NO_ERROR;
+    if (DetourDetach(&(PVOID&)g_pMessageBoxW, HookMessageBoxW) != NO_ERROR)
+    {
+        OutputDebugStringA("DetourDetach MessageBoxW Fail!\n");
+    }
+
+    //完成事务
+    return DetourTransactionCommit() == NO_ERROR;
 }
 
-extern "C" _declspec(dllexport) BOOL APIENTRY DropHook()
+BOOL APIENTRY DllMain(HMODULE hModule,
+    DWORD  ul_reason_for_call,
+    LPVOID lpReserved
+)
 {
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    DetourDetach(&(PVOID&)g_oldMessageBoxA, MyMessageBoxA);
-    DetourDetach(&(PVOID&)g_oldMessageBoxW, MyMessageBoxW);
-
-    LONG ret = DetourTransactionCommit();
-    return ret == NO_ERROR;
-}
-
-BOOL APIENTRY DllMain( HMODULE hModule,
-                       DWORD  ul_reason_for_call,
-                       LPVOID lpReserved
-					 )
-{
-	switch (ul_reason_for_call)
-	{
-	case DLL_PROCESS_ATTACH:
-        process = GetCurrentProcess();
-        SymInitialize(process, NULL, TRUE);
-        OutputDebugStringA("start hook....................................");
-        s_hDll = hModule;
-        DisableThreadLibraryCalls(hModule);
-        SetHook();
+    switch (ul_reason_for_call)
+    {
+    case DLL_PROCESS_ATTACH:
+        OutputDebugStringA("start hook....................................\n");
+        StartHook();
         break;
     case DLL_THREAD_ATTACH:
         break;
     case DLL_THREAD_DETACH:
         break;
-	case DLL_PROCESS_DETACH:
-        DropHook();
-        OutputDebugStringA("end hook....................................");
-		break;
-	}
-	return TRUE;
+    case DLL_PROCESS_DETACH:
+        StopHook();
+        OutputDebugStringA("end hook....................................\n");
+        break;
+    }
+    return TRUE;
 }
 
